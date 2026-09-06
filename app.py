@@ -4,134 +4,63 @@ import hashlib
 import hmac
 import time
 import random
-from datetime import datetime
 
-# ============================================================
-# PAGE CONFIGURATION
-# ============================================================
+try:
+    from streamlit_autorefresh import st_autorefresh
+except ImportError:
+    st_autorefresh = None
 
 st.set_page_config(
     page_title="Secure DigiLocker",
     page_icon="🔐",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed",
 )
 
-# ============================================================
-# CONSTANTS
-# ============================================================
-
-OTP_EXPIRY = 60
+OTP_VALID_SECONDS = 60
 MAX_OTP_ATTEMPTS = 3
-MAX_LOGIN_FAILURES = 3       # was 5 — spec calls for 3 failed attempts
-LOCKOUT_DURATION = 45        # seconds account stays locked before auto-unlock
-SESSION_DURATION = 90        # seconds an authenticated session stays valid
-
-# Academic demo secret.
-# In a real production system this must be stored securely.
-HMAC_SECRET = b"academic-demo-secret-change-me"
 
 DOCUMENTS = [
-    {"icon": "🪪", "name": "Aadhaar Card", "authority": "UIDAI", "status": "Issued", "date": "15 Jan 2025"},
-    {"icon": "🚗", "name": "Driving Licence", "authority": "Transport Department", "status": "Issued", "date": "20 Mar 2025"},
-    {"icon": "🗳️", "name": "Voter ID", "authority": "Election Commission", "status": "Issued", "date": "10 Apr 2025"},
-    {"icon": "🎓", "name": "Class 10 Certificate", "authority": "Education Board", "status": "Issued", "date": "12 Jun 2022"},
-    {"icon": "🎓", "name": "Class 12 Certificate", "authority": "Education Board", "status": "Issued", "date": "15 Jun 2024"},
-    {"icon": "🎓", "name": "Degree Certificate", "authority": "University", "status": "Issued", "date": "25 Jun 2026"},
-    {"icon": "📄", "name": "PAN Card", "authority": "Income Tax Department", "status": "Issued", "date": "05 Feb 2025"},
-    {"icon": "🏥", "name": "Health Certificate", "authority": "Health Department", "status": "Issued", "date": "18 Aug 2025"},
-    {"icon": "🏦", "name": "Income Certificate", "authority": "Revenue Department", "status": "Issued", "date": "02 Sep 2025"},
-    {"icon": "📑", "name": "Other Documents", "authority": "Various Authorities", "status": "Issued", "date": "01 Jan 2026"}
+    {"name": "Aadhaar Card", "icon": "🪪", "authority": "UIDAI", "status": "Verified", "date": "15 Aug 2025"},
+    {"name": "Driving Licence", "icon": "🚗", "authority": "Transport Department", "status": "Verified", "date": "08 Jun 2025"},
+    {"name": "Voter ID", "icon": "🗳️", "authority": "Election Commission of India", "status": "Verified", "date": "20 Jan 2025"},
+    {"name": "Class 10 Certificate", "icon": "🎓", "authority": "Education Board", "status": "Verified", "date": "12 May 2024"},
+    {"name": "Class 12 Certificate", "icon": "🎓", "authority": "Education Board", "status": "Verified", "date": "25 May 2024"},
+    {"name": "Degree Certificate", "icon": "🎓", "authority": "University", "status": "Available", "date": "30 Jul 2025"},
+    {"name": "PAN Card", "icon": "📄", "authority": "Income Tax Department", "status": "Verified", "date": "03 Mar 2025"},
+    {"name": "Health Certificate", "icon": "🏥", "authority": "Health Department", "status": "Available", "date": "18 Feb 2025"},
+    {"name": "Income Certificate", "icon": "🏦", "authority": "Revenue Department", "status": "Available", "date": "10 Apr 2025"},
+    {"name": "Other Documents", "icon": "📑", "authority": "Sample Authority", "status": "Available", "date": "01 Sep 2025"},
 ]
-
-# ============================================================
-# SESSION STATE
-# ============================================================
 
 defaults = {
     "page": "login",
     "mobile": "",
     "otp_hash": "",
-    "otp_time": 0,
-    "demo_otp": "",
+    "otp_created": 0.0,
     "otp_attempts": 0,
-    "login_failures": 0,
-    "account_locked": False,
-    "lockout_time": 0,
     "otp_used": False,
-    "pattern": [],
-    "grid": [],
-    "pattern_attempts": 0,
-    "enrolled_pattern": None,     # set by the user on first successful login, not hardcoded
+    "otp_blocked": False,
+    "demo_otp": "",
+    "physical_to_logical": {},
+    "pattern_selected": [],
+    "enrolled_pattern": [],
+    "enrollment_selected": [],
     "authenticated": False,
-    "session_expiry_time": 0,
-    "auth_start": 0,
-    "otp_time_taken": 0,
-    "pattern_time_taken": 0,
-    "session_time_taken": 0,
-    "last_auth_result": "",
-    "mode": "Demo Mode",
+    "nav": "Home",
     "font_scale": 1.0,
-    "requests": [],
-    "sim_results": [],
-    "notifications": 2,
-    "flash": ""
+    "demo_mode": True,
+    "pattern_error": "",
 }
 
 for key, value in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
-# ============================================================
-# CSS
-# ============================================================
+HMAC_SECRET = b"secure-digilocker-academic-demo-key"
 
-scale = st.session_state.font_scale
 
-st.markdown(
-    f"""
-    <style>
-    html, body, [class*="css"] {{ font-size: {scale}em; }}
-    .stApp {{ background-color: #f5f2ff; }}
-    .topbar {{
-        background-color: #17266b; color: white; padding: 14px 25px;
-        margin: -70px -70px 25px -70px; font-size: 15px; font-weight: 600;
-    }}
-    .brand {{ color: #5b2bbf; font-size: 30px; font-weight: 700; margin-bottom: 20px; }}
-    .card {{
-        background-color: white; padding: 28px; border-radius: 18px;
-        border: 1px solid #ddd6ee; box-shadow: 0 5px 20px rgba(0,0,0,0.07); margin-bottom: 20px;
-    }}
-    .document-card {{
-        background-color: white; padding: 20px; border-radius: 16px;
-        border: 1px solid #ddd6ee; margin-bottom: 12px;
-    }}
-    .demo {{
-        background-color: #fff5d6; padding: 10px 15px; border-radius: 10px;
-        border: 1px solid #e5c76b; margin-bottom: 15px;
-    }}
-    .security {{
-        background-color: #eaf7ee; padding: 10px 15px; border-radius: 10px;
-        border: 1px solid #9bd2aa; margin-bottom: 15px;
-    }}
-    .pattern-node {{ font-size: 24px; font-weight: bold; }}
-    @media (max-width: 768px) {{
-        .topbar {{ margin: -20px -20px 20px -20px; padding: 12px; font-size: 13px; }}
-        .brand {{ font-size: 24px; }}
-        .card {{ padding: 18px; }}
-        button {{ min-height: 48px !important; }}
-        input {{ min-height: 45px !important; }}
-    }}
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-# ============================================================
-# UTILITY FUNCTIONS
-# ============================================================
-
-def hash_otp(otp):
+def otp_digest(otp):
     return hmac.new(HMAC_SECRET, otp.encode(), hashlib.sha256).hexdigest()
 
 
@@ -139,671 +68,505 @@ def generate_otp():
     return f"{secrets.randbelow(1000000):06d}"
 
 
-def generate_grid():
-    numbers = list(range(1, 10))
-    secrets.SystemRandom().shuffle(numbers)
-    return numbers
+def create_mapping():
+    nodes = list(range(1, 10))
+    random.SystemRandom().shuffle(nodes)
+    return {i: nodes[i] for i in range(9)}
+
+
+def start_authentication(mobile):
+    otp = generate_otp()
+    st.session_state.mobile = mobile
+    st.session_state.otp_hash = otp_digest(otp)
+    st.session_state.otp_created = time.time()
+    st.session_state.otp_attempts = 0
+    st.session_state.otp_used = False
+    st.session_state.otp_blocked = False
+    st.session_state.demo_otp = otp
+    st.session_state.physical_to_logical = create_mapping()
+    st.session_state.pattern_selected = []
+    st.session_state.pattern_error = ""
+    st.session_state.page = "verify"
+
+
+def otp_remaining():
+    if not st.session_state.otp_created:
+        return 0
+    return max(0, OTP_VALID_SECONDS - int(time.time() - st.session_state.otp_created))
 
 
 def reset_otp():
-    otp = generate_otp()
-    st.session_state.otp_hash = hash_otp(otp)
-    st.session_state.demo_otp = otp
-    st.session_state.otp_time = time.time()
-    st.session_state.otp_attempts = 0
-    st.session_state.otp_used = False
+    start_authentication(st.session_state.mobile)
 
 
-def log_request(result, duration):
-    st.session_state.requests.append({
-        "time": datetime.now().strftime("%H:%M:%S"),
-        "result": result,
-        "duration": round(duration, 3)
-    })
-    if len(st.session_state.requests) > 100:
-        st.session_state.requests.pop(0)
+def logout():
+    for key in [
+        "mobile", "otp_hash", "otp_created", "otp_attempts", "otp_used",
+        "otp_blocked", "demo_otp", "physical_to_logical", "pattern_selected",
+        "enrolled_pattern", "enrollment_selected", "authenticated", "pattern_error"
+    ]:
+        if key in st.session_state:
+            if isinstance(st.session_state[key], list):
+                st.session_state[key] = []
+            elif isinstance(st.session_state[key], dict):
+                st.session_state[key] = {}
+            elif isinstance(st.session_state[key], bool):
+                st.session_state[key] = False
+            elif isinstance(st.session_state[key], (int, float)):
+                st.session_state[key] = 0
+            else:
+                st.session_state[key] = ""
+    st.session_state.page = "login"
+    st.session_state.nav = "Home"
 
 
-def register_failure():
-    """Single place that counts a failure (OTP or pattern) and locks the account at the threshold."""
-    st.session_state.login_failures += 1
-    if st.session_state.login_failures >= MAX_LOGIN_FAILURES:
-        st.session_state.account_locked = True
-        st.session_state.lockout_time = time.time()
+st.markdown(
+    f"""
+    <style>
+    html, body, [class*="css"] {{ font-size: {st.session_state.font_scale}em; }}
+    .stApp {{ background: #f4f0ff; }}
+    .top-government {{ background:#07185c; color:white; padding:9px 6%; font-weight:600; }}
+    .brand-bar {{ background:white; padding:18px 6%; border-bottom:1px solid #ddd6f4; display:flex; align-items:center; gap:14px; }}
+    .brand-icon {{ width:46px; height:46px; border-radius:12px; background:#6741f5; color:white; display:flex; align-items:center; justify-content:center; font-size:25px; }}
+    .brand-name {{ color:#5132d5; font-size:1.65rem; font-weight:800; }}
+    .brand-sub {{ color:#666; font-size:.72rem; }}
+    .prototype {{ display:inline-block; padding:5px 10px; border-radius:15px; background:#fff3cd; color:#664d03; font-size:.72rem; margin-left:8px; }}
+    .login-card {{ background:white; border:1px solid #ddd; border-radius:20px; padding:34px; box-shadow:0 8px 30px rgba(40,20,100,.10); max-width:560px; margin:28px auto; }}
+    .login-title {{ font-size:2rem; font-weight:800; color:#111; }}
+    .login-subtitle {{ color:#666; margin-bottom:18px; }}
+    .info-box {{ padding:14px 16px; border-radius:12px; background:#f1edff; border-left:5px solid #6741f5; margin:12px 0; }}
+    .otp-box {{ padding:18px; background:#fff8df; border:1px solid #e8d28a; border-radius:12px; margin:15px 0; text-align:center; }}
+    .otp-number {{ font-size:2rem; font-weight:900; letter-spacing:7px; color:#4325bd; }}
+    .timer {{ font-size:1.15rem; font-weight:800; color:#b42318; }}
+    .dashboard-card {{ background:white; border:1px solid #ded9ef; border-radius:16px; padding:20px; min-height:180px; box-shadow:0 4px 16px rgba(40,20,100,.06); }}
+    .doc-icon {{ font-size:2.1rem; }} .doc-name {{ font-size:1.1rem; font-weight:800; }}
+    .doc-meta {{ color:#666; font-size:.88rem; margin:5px 0; }}
+    .status {{ display:inline-block; padding:4px 9px; border-radius:10px; background:#e8f5e9; color:#176b2c; font-size:.78rem; font-weight:700; }}
+    .dashboard-banner {{ background:linear-gradient(135deg,#5634dd,#7d5bea); color:white; padding:28px; border-radius:18px; margin-bottom:22px; }}
+    .dashboard-banner h1 {{ margin:0; font-size:2rem; }}
+    .footer {{ text-align:center; color:#666; padding:28px 10px; font-size:.82rem; }}
+    @media (max-width:700px) {{
+        .top-government {{ padding:8px 15px; font-size:.78rem; }}
+        .brand-bar {{ padding:13px 15px; }}
+        .brand-name {{ font-size:1.35rem; }}
+        .login-card {{ margin:12px 4px; padding:22px 17px; border-radius:15px; }}
+        .login-title {{ font-size:1.55rem; }}
+        .dashboard-banner {{ padding:20px; }}
+        .dashboard-banner h1 {{ font-size:1.5rem; }}
+        button {{ min-height:48px !important; }}
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-
-def clear_authentication():
-    st.session_state.otp_hash = ""
-    st.session_state.otp_time = 0
-    st.session_state.demo_otp = ""
-    st.session_state.otp_attempts = 0
-    st.session_state.otp_used = False
-    st.session_state.pattern = []
-    st.session_state.grid = []
-    st.session_state.pattern_attempts = 0
-    st.session_state.authenticated = False
-    st.session_state.session_expiry_time = 0
-
-
-# ============================================================
-# HEADER
-# ============================================================
-
-st.markdown('<div class="topbar">🇮🇳 Government Service Style • Academic Prototype</div>', unsafe_allow_html=True)
-st.markdown('<div class="brand">☁️ Secure DigiLocker</div>', unsafe_allow_html=True)
-
-# ============================================================
-# SIDEBAR
-# ============================================================
+st.markdown(
+    """
+    <div class="top-government">🇮🇳 Government of India &nbsp; | &nbsp; Secure Digital Services</div>
+    <div class="brand-bar">
+        <div class="brand-icon">🔐</div>
+        <div>
+            <div class="brand-name">Secure DigiLocker <span class="prototype">ACADEMIC PROTOTYPE</span></div>
+            <div class="brand-sub">Secure digital document access</div>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 with st.sidebar:
-    st.subheader("Accessibility")
-
-    if st.button("A+ Increase Text", use_container_width=True):
-        st.session_state.font_scale = min(1.4, st.session_state.font_scale + 0.1)
+    st.markdown("## Accessibility")
+    if st.button("A− Smaller text", use_container_width=True):
+        st.session_state.font_scale = max(.85, st.session_state.font_scale - .05)
         st.rerun()
-
-    if st.button("A- Decrease Text", use_container_width=True):
-        st.session_state.font_scale = max(0.8, st.session_state.font_scale - 0.1)
+    if st.button("A+ Larger text", use_container_width=True):
+        st.session_state.font_scale = min(1.30, st.session_state.font_scale + .05)
         st.rerun()
+    st.session_state.demo_mode = st.checkbox("Demo Mode", value=st.session_state.demo_mode)
+    st.markdown("---")
+    st.info("Academic simulation only. Use dummy data. This is not an actual government service.")
 
-    st.divider()
-    st.subheader("Authentication Mode")
-    st.session_state.mode = st.radio("Select mode", ["Demo Mode", "Security Mode"])
-    st.caption("Demo Mode shows extra guidance text. Security Mode uses generic authentication errors. Neither mode ever reveals your actual pattern or OTP answer.")
-
-    st.divider()
-    st.caption("Secure DigiLocker is an independent academic prototype.")
-
-# ============================================================
-# SESSION EXPIRY CHECK (runs before rendering an authenticated page)
-# ============================================================
-
-if st.session_state.authenticated and st.session_state.page == "dashboard":
-    if time.time() > st.session_state.session_expiry_time:
-        clear_authentication()
-        st.session_state.flash = "Your session expired due to inactivity. Please log in again."
-        st.session_state.page = "login"
-        st.rerun()
-
-# ============================================================
-# LOGIN
-# ============================================================
-
-if st.session_state.page == "login":
-
+# ---------------- ENROLLMENT ----------------
+if not st.session_state.authenticated and st.session_state.page == "enroll":
     st.markdown(
         """
-        <div class="card">
-        <h1>Login or Create Account</h1>
-        <p>Enter your mobile number to proceed.</p>
+        <div class="login-card">
+            <div class="login-title">Create Your Security Pattern</div>
+            <div class="login-subtitle">
+                Choose a pattern that you can remember. It will be converted into a logical pattern
+                and the physical positions will change on every login.
+            </div>
+            <div class="info-box">
+                <b>How it works</b><br>
+                Select at least 3 nodes. Your chosen logical sequence becomes your enrolled pattern.
+                Remember the node numbers, not their physical positions.
+            </div>
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
-    if st.session_state.flash:
-        st.warning(st.session_state.flash)
-        st.session_state.flash = ""
+    left, center, right = st.columns([1, 2, 1])
+    with center:
+        st.markdown("### Choose your pattern")
 
-    if st.session_state.account_locked:
-
-        remaining_lock = int(LOCKOUT_DURATION - (time.time() - st.session_state.lockout_time))
-
-        if remaining_lock <= 0:
-            # auto-unlock
-            st.session_state.account_locked = False
-            st.session_state.login_failures = 0
-            st.rerun()
-
-        st.error("Account is temporarily locked because of repeated failed authentication attempts.")
-        st.warning(f"Auto-unlocks in {remaining_lock} seconds.")
-        st.progress(max(0, remaining_lock) / LOCKOUT_DURATION)
-
-        time.sleep(1)
-        st.rerun()
-
-    col1, col2 = st.columns([1, 4])
-
-    with col1:
-        st.text_input("Country", value="+91", disabled=True)
-
-    with col2:
-        mobile = st.text_input("Mobile Number", placeholder="Enter 10-digit mobile number", max_chars=10)
-
-    if st.button("Continue", type="primary", use_container_width=True):
-
-        if not mobile.isdigit() or len(mobile) != 10:
-            st.error("Please enter a valid 10-digit mobile number.")
-        else:
-            start = time.perf_counter()
-            st.session_state.mobile = mobile
-            reset_otp()
-            st.session_state.auth_start = time.perf_counter()
-            st.session_state.page = "otp"
-            duration = time.perf_counter() - start
-            log_request("OTP Generated", duration)
-            st.rerun()
-
-    st.divider()
-
-    if st.button("▣  Login using QR Code", use_container_width=True):
-        st.info("QR login is included as a UI demonstration.")
-
-    st.caption("By continuing, you agree to the Terms of Service and Privacy Policy.")
-    st.caption("Academic Prototype • No real identity documents or credentials are collected.")
-
-# ============================================================
-# OTP PAGE
-# ============================================================
-
-elif st.session_state.page == "otp":
-
-    st.markdown(
-        """
-        <div class="card">
-        <h1>Verify Mobile Number</h1>
-        <p>Enter the OTP to continue.</p>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    elapsed = int(time.time() - st.session_state.otp_time)
-    remaining = OTP_EXPIRY - elapsed
-
-    if st.session_state.otp_used:
-        st.error("This OTP has already been used.")
-        if st.button("Generate New OTP", use_container_width=True):
-            reset_otp()
-            st.rerun()
-        st.stop()
-
-    if remaining <= 0:
-        st.error("OTP has expired.")
-        if st.button("Generate New OTP", type="primary", use_container_width=True):
-            reset_otp()
-            st.rerun()
-        st.stop()
-
-    st.markdown(
-        """
-        <div class="demo">
-        <b>Demo OTP</b><br>
-        In a real system this would be sent through SMS.
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    st.code(st.session_state.demo_otp)
-    st.warning(f"OTP expires in {remaining} seconds.")
-    st.progress(remaining / OTP_EXPIRY)
-    st.write(f"Attempts used: {st.session_state.otp_attempts}/{MAX_OTP_ATTEMPTS}")
-
-    entered_otp = st.text_input("Enter 6-digit OTP", max_chars=6, placeholder="Enter OTP")
-
-    if st.button("Verify OTP", type="primary", use_container_width=True):
-
-        start = time.perf_counter()
-
-        if st.session_state.otp_attempts >= MAX_OTP_ATTEMPTS:
-            # exceeding the OTP attempt cap now also counts as a login failure
-            register_failure()
-            st.error("Maximum OTP attempts reached. This counts as a failed login attempt.")
-            if st.session_state.account_locked:
-                st.error("Account has been locked because of repeated failures.")
-                st.session_state.page = "login"
-                st.rerun()
-        else:
-            st.session_state.otp_attempts += 1
-            entered_hash = hash_otp(entered_otp)
-            correct = hmac.compare_digest(entered_hash, st.session_state.otp_hash)
-
-            if correct and remaining > 0:
-                st.session_state.otp_used = True
-                st.session_state.otp_time_taken = time.perf_counter() - start
-                st.session_state.grid = generate_grid()
-                st.session_state.pattern = []
-                st.session_state.pattern_attempts = 0
-                st.session_state.page = "pattern"
-                log_request("OTP Success", st.session_state.otp_time_taken)
-                st.rerun()
-            else:
-                duration = time.perf_counter() - start
-                log_request("OTP Failure", duration)
-                register_failure()
-
-                if st.session_state.mode == "Demo Mode":
-                    remaining_attempts = MAX_OTP_ATTEMPTS - st.session_state.otp_attempts
-                    st.error(f"Incorrect OTP. Attempts remaining: {max(0, remaining_attempts)}")
-                else:
-                    st.error("Authentication failed.")
-
-                if st.session_state.account_locked:
-                    st.error("Account has been locked because of repeated failures.")
-                    st.session_state.page = "login"
-                    st.rerun()
-
-    if st.button("Generate New OTP", use_container_width=True):
-        reset_otp()
-        st.rerun()
-
-    if st.button("Back to Login", use_container_width=True):
-        st.session_state.page = "login"
-        st.rerun()
-
-# ============================================================
-# PATTERN PAGE  (doubles as enrollment the first time)
-# ============================================================
-
-elif st.session_state.page == "pattern":
-
-    is_enrollment = st.session_state.enrolled_pattern is None
-
-    st.markdown(
-        f"""
-        <div class="card">
-        <h1>{"Set Up Your Security Pattern" if is_enrollment else "Dynamic Visual Pattern Authentication"}</h1>
-        <p>{"Tap at least 4 numbers, in the order you want to remember, to create your pattern." if is_enrollment else "Enter your remembered security pattern using the grid below."}</p>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-    if not is_enrollment:
-        st.info(
-            "The physical position of each number changes every time you log in. "
-            "Tap the numbers in the same order you memorized during setup."
-        )
-
-    grid = st.session_state.grid
-
-    st.subheader("Current Physical Grid")
-
-    for row in range(3):
-        cols = st.columns(3)
-        for col in range(3):
-            index = row * 3 + col
-            number = grid[index]
-            with cols[col]:
-                if st.button(str(number), key=f"pattern_{index}", use_container_width=True):
-                    if number not in st.session_state.pattern:
-                        st.session_state.pattern.append(number)
-                    st.rerun()
-
-    st.write("")
-
-    if st.session_state.pattern:
-        pattern_display = " → ".join(map(str, st.session_state.pattern))
-        st.success(f"Pattern entered: {pattern_display}")
-    else:
-        st.info("Pattern entered: None")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        if st.button("Clear Pattern", use_container_width=True):
-            st.session_state.pattern = []
-            st.rerun()
-
-    with col2:
-        button_label = "Save Pattern" if is_enrollment else "Verify Pattern"
-        if st.button(button_label, type="primary", use_container_width=True):
-
-            start = time.perf_counter()
-
-            if len(st.session_state.pattern) < 4:
-                st.error("Select at least 4 nodes to form a pattern.")
-
-            elif is_enrollment:
-                # Store the *logical* sequence: which number was tapped, in order —
-                # not the physical grid position, since that position is reshuffled every login.
-                st.session_state.enrolled_pattern = st.session_state.pattern.copy()
-                st.session_state.authenticated = True
-                st.session_state.session_expiry_time = time.time() + SESSION_DURATION
-                st.session_state.session_time_taken = time.perf_counter() - st.session_state.auth_start
-                st.session_state.last_auth_result = "Success"
-                log_request("Pattern Enrolled + Login", st.session_state.session_time_taken)
-                st.session_state.page = "dashboard"
-                st.rerun()
-
-            else:
-                st.session_state.pattern_attempts += 1
-                correct_pattern = st.session_state.pattern == st.session_state.enrolled_pattern
-                duration = time.perf_counter() - start
-                st.session_state.pattern_time_taken = duration
-
-                if correct_pattern:
-                    st.session_state.authenticated = True
-                    st.session_state.session_expiry_time = time.time() + SESSION_DURATION
-                    st.session_state.session_time_taken = time.perf_counter() - st.session_state.auth_start
-                    st.session_state.last_auth_result = "Success"
-                    log_request("Authentication Success", st.session_state.session_time_taken)
-                    st.session_state.page = "dashboard"
-                    st.rerun()
-                else:
-                    log_request("Pattern Failure", duration)
-                    register_failure()
-
-                    if st.session_state.mode == "Demo Mode":
-                        remaining_attempts = MAX_LOGIN_FAILURES - st.session_state.login_failures
-                        st.error(f"Incorrect pattern. Attempts remaining before lockout: {max(0, remaining_attempts)}")
-                    else:
-                        st.error("Authentication failed.")
-
-                    st.session_state.pattern = []
-
-                    if st.session_state.account_locked:
-                        st.error("Account locked because of repeated failures.")
-                        st.session_state.page = "login"
+        for row in range(3):
+            cols = st.columns(3)
+            for col_index in range(3):
+                node = row * 3 + col_index + 1
+                selected_pos = (
+                    st.session_state.enrollment_selected.index(node) + 1
+                    if node in st.session_state.enrollment_selected else None
+                )
+                label = f"✓ Node {node} ({selected_pos})" if selected_pos else f"● Node {node}"
+                with cols[col_index]:
+                    if st.button(
+                        label,
+                        key=f"enroll_{node}",
+                        use_container_width=True,
+                        disabled=node in st.session_state.enrollment_selected
+                        or len(st.session_state.enrollment_selected) >= 9,
+                    ):
+                        st.session_state.enrollment_selected.append(node)
                         st.rerun()
 
-    st.caption(
-        "The prototype demonstrates logical-node mapping. "
-        "A production implementation should use a secure touch-drag component "
-        "and persist the enrolled pattern hash server-side, not in browser session state."
+        selected = st.session_state.enrollment_selected
+        st.markdown(
+            f'<div class="info-box"><b>Pattern selected:</b> '
+            f'{" → ".join(map(str, selected)) if selected else "None"}</div>',
+            unsafe_allow_html=True,
+        )
+
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("Clear Pattern", use_container_width=True):
+                st.session_state.enrollment_selected = []
+                st.rerun()
+        with b2:
+            if st.button("Save Pattern", type="primary", use_container_width=True):
+                if len(selected) < 3:
+                    st.error("Choose at least 3 nodes.")
+                else:
+                    st.session_state.enrolled_pattern = selected[:]
+                    st.session_state.enrollment_selected = []
+                    st.session_state.page = "login"
+                    st.success("Pattern enrolled successfully. You can now log in.")
+                    st.rerun()
+
+    st.markdown(
+        '<div class="footer">Your pattern is stored only in this Streamlit session for this academic prototype.</div>',
+        unsafe_allow_html=True,
     )
 
-# ============================================================
-# SESSION ERROR (simulated failure, distinct from expiry)
-# ============================================================
+# ---------------- LOGIN ----------------
+elif not st.session_state.authenticated and st.session_state.page == "login":
+    st.markdown(
+        """
+        <div class="login-card">
+            <div class="login-title">Login or Create Account</div>
+            <div class="login-subtitle">Enter your mobile number to proceed</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-elif st.session_state.page == "session_error":
+    left, center, right = st.columns([1, 2, 1])
+    with center:
+        if not st.session_state.enrolled_pattern:
+            st.info("New user? Create your security pattern before logging in.")
+            if st.button("Create Security Pattern", type="primary", use_container_width=True):
+                st.session_state.page = "enroll"
+                st.rerun()
+
+        mobile = st.text_input(
+            "Mobile number",
+            placeholder="10-digit mobile number",
+            max_chars=10,
+        )
+
+        st.caption("By continuing, I agree to the Terms of Service.")
+
+        if st.button("Continue", type="primary", use_container_width=True):
+            cleaned = mobile.strip().replace(" ", "")
+            if not cleaned.isdigit() or len(cleaned) != 10:
+                st.error("Please enter a valid 10-digit mobile number.")
+            elif not st.session_state.enrolled_pattern:
+                st.error("Please create your security pattern first.")
+            else:
+                start_authentication(cleaned)
+                st.rerun()
+
+        st.markdown(
+            "<div style='text-align:center;margin:18px 0;color:#777;'>──────── OR ────────</div>",
+            unsafe_allow_html=True,
+        )
+
+        if st.button("▣  Login using QR Code", use_container_width=True):
+            st.info("QR login is simulated. No real QR authentication is performed.")
+
+        st.markdown(
+            '<div class="info-box"><b>🔐 Two-step authentication</b><br>'
+            'OTP + your dynamic visual pattern are required.</div>',
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        '<div class="footer">Secure DigiLocker — Academic Prototype<br>Dummy data only.</div>',
+        unsafe_allow_html=True,
+    )
+
+# ---------------- OTP + PATTERN ----------------
+elif not st.session_state.authenticated and st.session_state.page == "verify":
+    if st_autorefresh is not None:
+        st_autorefresh(interval=1000, key="otp_timer")
+
+    remaining = otp_remaining()
 
     st.markdown(
         """
-        <div class="card">
-        <h1>⚠️ Session Failure</h1>
-        <p>Connection to the authentication server was lost.</p>
+        <div class="login-card">
+            <div class="login-title">Secure Verification</div>
+            <div class="login-subtitle">Complete both steps to access your documents.</div>
         </div>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
-    st.error("This simulates a network/session failure distinct from normal session expiry — for example a dropped connection mid-session.")
+    left, center, right = st.columns([1, 2, 1])
+    with center:
+        st.markdown("### Step 1 — OTP Verification")
 
-    if st.button("Retry / Back to Login", type="primary", use_container_width=True):
-        clear_authentication()
-        st.session_state.page = "login"
-        st.rerun()
+        if st.session_state.otp_blocked:
+            st.error("OTP verification is blocked after 3 incorrect attempts.")
+            if st.button("Generate New OTP", type="primary", use_container_width=True):
+                reset_otp()
+                st.rerun()
 
-# ============================================================
-# DASHBOARD
-# ============================================================
+        elif remaining == 0:
+            st.error("This OTP has expired.")
+            if st.button("Generate New OTP", type="primary", use_container_width=True):
+                reset_otp()
+                st.rerun()
 
-elif st.session_state.page == "dashboard":
+        else:
+            st.markdown(
+                f'<div class="otp-box">'
+                f'<div>Demo OTP — In a real system this would be sent through SMS.</div>'
+                f'<div class="otp-number">{st.session_state.demo_otp}</div>'
+                f'<div class="timer">Expires in {remaining} seconds</div></div>',
+                unsafe_allow_html=True,
+            )
 
-    st.sidebar.success("Authenticated")
+            otp_input = st.text_input("Enter 6-digit OTP", max_chars=6, type="password")
 
-    remaining_session = int(st.session_state.session_expiry_time - time.time())
-    st.sidebar.caption(f"Session expires in {max(0, remaining_session)}s")
+            if st.button("Verify OTP", use_container_width=True):
+                if not otp_input.isdigit() or len(otp_input) != 6:
+                    st.error("Enter a valid 6-digit OTP.")
+                elif remaining == 0:
+                    st.error("OTP expired. Generate a new OTP.")
+                elif st.session_state.otp_used:
+                    st.error("This OTP has already been used.")
+                else:
+                    entered_hash = otp_digest(otp_input)
+                    if hmac.compare_digest(entered_hash, st.session_state.otp_hash):
+                        st.session_state.otp_used = True
+                        st.success("OTP verified. Complete the visual pattern.")
+                    else:
+                        st.session_state.otp_attempts += 1
+                        left_attempts = MAX_OTP_ATTEMPTS - st.session_state.otp_attempts
+                        if left_attempts <= 0:
+                            st.session_state.otp_blocked = True
+                            st.error("OTP blocked after 3 incorrect attempts.")
+                        else:
+                            st.error(f"Incorrect OTP. {left_attempts} attempt(s) remaining.")
 
-    navigation = st.sidebar.radio(
-        "Navigation",
-        [
-            "Home",
-            "My Documents",
-            "Issued Documents",
-            "Shared Documents",
-            "Profile",
-            "Help",
-            "Performance Simulation",
-            "⚠️ Simulate Session Failure",
-            "Logout"
-        ]
-    )
-
-    if navigation == "Logout":
-        clear_authentication()
-        st.session_state.page = "login"
-        st.rerun()
-
-    elif navigation == "⚠️ Simulate Session Failure":
-        st.session_state.page = "session_error"
-        st.rerun()
-
-    elif navigation == "Home":
+        st.markdown("---")
+        st.markdown("### Step 2 — Dynamic Visual Pattern")
 
         st.markdown(
-            """
-            <div class="card">
-            <h1>Welcome back! 👋</h1>
-            <p>Your secure digital document locker.</p>
-            </div>
-            """,
-            unsafe_allow_html=True
+            '<div class="info-box"><b>Your enrolled logical pattern:</b> '
+            f'{len(st.session_state.enrolled_pattern)} nodes<br>'
+            '<b>Important:</b> The node numbers are randomly moved to new physical positions on every login.</div>',
+            unsafe_allow_html=True,
         )
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Documents", len(DOCUMENTS))
-        with col2:
-            st.metric("Verified", len(DOCUMENTS))
-        with col3:
-            st.metric("Notifications", st.session_state.notifications)
+        mapping = st.session_state.physical_to_logical
 
-        st.divider()
-        st.subheader("Important Documents")
-
-        for document in DOCUMENTS[:6]:
-            st.markdown(
-                f"""
-                <div class="document-card">
-                <h3>{document["icon"]} {document["name"]}</h3>
-                <p><b>Issuing Authority:</b> {document["authority"]}</p>
-                <p><b>Status:</b> {document["status"]}</p>
-                <p><b>Issue Date:</b> {document["date"]}</p>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-    elif navigation in ["My Documents", "Issued Documents"]:
-
-        st.header(navigation)
-
-        for document in DOCUMENTS:
-            st.markdown(
-                f"""
-                <div class="document-card">
-                <h3>{document["icon"]} {document["name"]}</h3>
-                <p><b>Issuing Authority:</b> {document["authority"]}</p>
-                <p><b>Status:</b> {document["status"]}</p>
-                <p><b>Issue Date:</b> {document["date"]}</p>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.button("View", key=f"view_{document['name']}", use_container_width=True)
-            with col2:
-                st.download_button(
-                    "Download Demo",
-                    data=(
-                        "SECURE DIGILOCKER ACADEMIC PROTOTYPE\n\n"
-                        f"Document: {document['name']}\n"
-                        f"Issuing Authority: {document['authority']}\n"
-                        f"Status: {document['status']}\n"
-                        f"Issue Date: {document['date']}\n\n"
-                        "This is dummy data and not an official document."
-                    ),
-                    file_name=document["name"].replace(" ", "_") + ".txt",
-                    key=f"download_{document['name']}",
-                    use_container_width=True
+        for row in range(3):
+            cols = st.columns(3)
+            for col_index in range(3):
+                physical_index = row * 3 + col_index
+                logical = mapping[physical_index]
+                selected_pos = (
+                    st.session_state.pattern_selected.index(logical) + 1
+                    if logical in st.session_state.pattern_selected else None
                 )
+                label = (
+                    f"✓ Node {logical} ({selected_pos})"
+                    if selected_pos else f"● Node {logical}"
+                )
+                with cols[col_index]:
+                    if st.button(
+                        label,
+                        key=f"login_node_{physical_index}_{logical}",
+                        use_container_width=True,
+                        disabled=logical in st.session_state.pattern_selected
+                        or len(st.session_state.pattern_selected) >= len(st.session_state.enrolled_pattern),
+                    ):
+                        st.session_state.pattern_selected.append(logical)
+                        st.session_state.pattern_error = ""
+                        st.rerun()
 
-    elif navigation == "Shared Documents":
+        entered = st.session_state.pattern_selected
+        st.markdown(
+            f'<div class="info-box"><b>Pattern entered:</b> '
+            f'{" → ".join(map(str, entered)) if entered else "None"}</div>',
+            unsafe_allow_html=True,
+        )
 
-        st.header("Shared Documents")
-        st.info("This prototype contains sample sharing information only.")
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("Clear Pattern", use_container_width=True):
+                st.session_state.pattern_selected = []
+                st.session_state.pattern_error = ""
+                st.rerun()
+        with b2:
+            if st.button("Complete Secure Login", type="primary", use_container_width=True):
+                if not st.session_state.otp_used:
+                    st.error("Verify the OTP first.")
+                elif entered != st.session_state.enrolled_pattern:
+                    st.session_state.pattern_error = "Authentication failed."
+                    if st.session_state.demo_mode:
+                        st.error(
+                            "Incorrect pattern for this demo. "
+                            "Use the logical sequence you created during enrollment."
+                        )
+                    else:
+                        st.error("Authentication failed. Please try again.")
+                else:
+                    st.session_state.authenticated = True
+                    st.session_state.page = "dashboard"
+                    st.session_state.nav = "Home"
+                    st.rerun()
 
-        for document in DOCUMENTS[:4]:
-            st.markdown(
-                f"""
-                <div class="document-card">
-                <h3>{document["icon"]} {document["name"]}</h3>
-                <p>Shared with: Academic Demo User</p>
-                <p>Status: Active</p>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+        if st.session_state.pattern_error:
+            st.error(st.session_state.pattern_error)
 
-    elif navigation == "Profile":
+        st.markdown(
+            '<div class="footer">Both OTP and the enrolled dynamic pattern are required.</div>',
+            unsafe_allow_html=True,
+        )
 
-        st.header("Profile")
-        st.info("Personal information is intentionally not collected.")
-        st.write(f"**Demo Mobile:** +91 XXXXX{st.session_state.mobile[-4:]}")
-        st.write("**Authentication:** OTP + Dynamic Pattern")
-        st.write("**Account Status:** Active")
+# ---------------- DASHBOARD ----------------
+elif st.session_state.authenticated:
+    nav_options = ["Home", "My Documents", "Issued Documents", "Shared Documents", "Profile", "Help", "Logout"]
 
-    elif navigation == "Help":
+    selected_nav = st.radio(
+        "Navigation",
+        nav_options,
+        horizontal=True,
+        index=nav_options.index(st.session_state.nav),
+        label_visibility="collapsed",
+    )
 
-        st.header("Help")
+    if selected_nav != st.session_state.nav:
+        st.session_state.nav = selected_nav
+        if selected_nav == "Logout":
+            logout()
+            st.rerun()
 
-        with st.expander("How does OTP authentication work?"):
+    st.markdown(
+        '<div class="dashboard-banner"><h1>Welcome back! 👋</h1>'
+        '<p>Your documents are available in your Secure DigiLocker dashboard.</p></div>',
+        unsafe_allow_html=True,
+    )
+
+    if st.session_state.nav in ["Home", "My Documents"]:
+        st.subheader("Your Documents")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Documents", "10")
+        c2.metric("Verified", "7")
+        c3.metric("Available", "10")
+
+        st.markdown("### Important Documents")
+
+        for start in range(0, len(DOCUMENTS), 2):
+            cols = st.columns(2)
+            for col, doc in zip(cols, DOCUMENTS[start:start + 2]):
+                with col:
+                    st.markdown(
+                        f'<div class="dashboard-card">'
+                        f'<div class="doc-icon">{doc["icon"]}</div>'
+                        f'<div class="doc-name">{doc["name"]}</div>'
+                        f'<div class="doc-meta"><b>Authority:</b> {doc["authority"]}</div>'
+                        f'<div class="doc-meta"><b>Issue date:</b> {doc["date"]}</div>'
+                        f'<span class="status">{doc["status"]}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+                    b1, b2 = st.columns(2)
+                    with b1:
+                        if st.button("View", key=f"view_{doc['name']}", use_container_width=True):
+                            st.info(f"Demo view: {doc['name']}. This is a sample document.")
+                    with b2:
+                        sample = (
+                            "SECURE DIGILOCKER ACADEMIC PROTOTYPE\n\n"
+                            f"Document: {doc['name']}\n"
+                            f"Issuing Authority: {doc['authority']}\n"
+                            f"Status: {doc['status']}\n"
+                            f"Issue Date: {doc['date']}\n\n"
+                            "Dummy document for demonstration only."
+                        )
+                        st.download_button(
+                            "Download",
+                            data=sample,
+                            file_name=f"{doc['name'].replace(' ', '_')}_sample.txt",
+                            mime="text/plain",
+                            key=f"download_{doc['name']}",
+                            use_container_width=True,
+                        )
+
+    elif st.session_state.nav == "Issued Documents":
+        st.subheader("Issued Documents")
+        st.info("Sample issued documents only. No live government issuer is connected.")
+        for doc in DOCUMENTS[:5]:
+            st.write(f"{doc['icon']} **{doc['name']}** — {doc['authority']}")
+
+    elif st.session_state.nav == "Shared Documents":
+        st.subheader("Shared Documents")
+        st.info("No sample documents have been shared yet.")
+
+    elif st.session_state.nav == "Profile":
+        st.subheader("Profile")
+        st.write("**Account:** Demo User")
+        st.write(f"**Mobile:** +91 {st.session_state.mobile}")
+        st.write("**Authentication:** OTP + Dynamic Visual Pattern")
+        st.write("**Account type:** Academic Prototype")
+
+    elif st.session_state.nav == "Help":
+        st.subheader("Help & Security Information")
+        with st.expander("OTP security", expanded=True):
             st.write(
-                "A random 6-digit OTP is generated, hashed for verification, "
-                "expires after 60 seconds, and becomes invalid after successful use."
+                "A cryptographically secure random OTP is generated. "
+                "Only its HMAC-SHA256 digest is stored for verification. "
+                "The OTP expires after 60 seconds and is invalid after successful use."
             )
-
-        with st.expander("How does dynamic pattern authentication work?"):
+        with st.expander("Dynamic pattern authentication"):
             st.write(
-                "You choose your own logical pattern once, during first login. "
-                "That sequence never changes, but the physical position of each "
-                "number on the grid is reshuffled on every authentication attempt."
+                "During enrollment, the user creates a logical sequence of nodes. "
+                "During each login, those logical nodes are randomly shuffled across "
+                "the physical 3x3 grid. The user selects the same logical sequence."
             )
-
-        with st.expander("What happens after repeated failures?"):
+        with st.expander("Combined authentication"):
             st.write(
-                f"The prototype limits OTP attempts to {MAX_OTP_ATTEMPTS} and locks "
-                f"the account for {LOCKOUT_DURATION} seconds after {MAX_LOGIN_FAILURES} "
-                "total failed attempts (OTP or pattern)."
+                "Authentication requires both the correct OTP and the correct enrolled pattern."
             )
-
-        with st.expander("What happens when my session ends?"):
+        with st.expander("Prototype limitation"):
             st.write(
-                f"An authenticated session automatically expires after {SESSION_DURATION} "
-                "seconds. A separate 'Simulate Session Failure' option in the sidebar "
-                "demonstrates an abrupt connection failure, distinct from normal expiry."
+                "This is an academic simulation. It does not connect to DigiLocker, UIDAI, "
+                "SMS gateways, or government databases."
             )
 
-    elif navigation == "Performance Simulation":
-
-        st.header("Authentication Performance Simulation")
-        st.caption("These values simulate system behavior for an academic project.")
-        st.subheader("Current Authentication Metrics")
-
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("OTP Time", f"{st.session_state.otp_time_taken:.4f}s")
-        with col2:
-            st.metric("Pattern Time", f"{st.session_state.pattern_time_taken:.4f}s")
-        with col3:
-            st.metric("Session Time", f"{st.session_state.session_time_taken:.4f}s")
-        with col4:
-            successful = sum(1 for r in st.session_state.requests if r["result"] == "Authentication Success")
-            total = len(st.session_state.requests)
-            success_rate = (successful / total) * 100 if total > 0 else 0
-            st.metric("Success Rate", f"{success_rate:.1f}%")
-
-        st.divider()
-        st.subheader("Concurrent Request Simulation")
-
-        request_count = st.slider("Number of simulated login requests", min_value=1, max_value=100, value=20)
-        server_capacity = st.slider("Server requests processed at once", min_value=1, max_value=20, value=5)
-
-        if st.button("Run Request Simulation", type="primary", use_container_width=True):
-            results = []
-            queue_length = 0
-            for i in range(request_count):
-                processing_time = random.uniform(0.08, 0.35)
-                if i >= server_capacity:
-                    queue_length += 1
-                    processing_time += random.uniform(0.05, 0.20)
-                results.append({
-                    "Request": i + 1,
-                    "Processing Time": round(processing_time, 3),
-                    "Queued": "Yes" if i >= server_capacity else "No"
-                })
-            st.session_state.sim_results = results
-            st.success("Concurrent request simulation completed.")
-
-        if st.session_state.sim_results:
-            average_time = sum(r["Processing Time"] for r in st.session_state.sim_results) / len(st.session_state.sim_results)
-            queued = sum(1 for r in st.session_state.sim_results if r["Queued"] == "Yes")
-            st.metric("Average Response Time", f"{average_time:.3f}s")
-            st.metric("Queued Requests", queued)
-            st.dataframe(st.session_state.sim_results, use_container_width=True)
-
-        st.divider()
-        st.subheader("Simulated Resource Utilization")
-
-        load = min(100, int(20 + request_count * 0.7 + random.uniform(0, 15)))
-        cpu = min(100, int(15 + request_count * 0.6))
-        memory = min(100, int(30 + request_count * 0.3))
-        database = min(100, int(20 + request_count * 0.5))
-
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Server Load", f"{load}%")
-        with col2:
-            st.metric("CPU", f"{cpu}%")
-        with col3:
-            st.metric("Memory", f"{memory}%")
-        with col4:
-            st.metric("Database", f"{database}%")
-
-        st.progress(load / 100)
-
-        if load >= 80:
-            st.warning("High server load detected.")
-        elif load >= 60:
-            st.info("Moderate server load detected.")
-        else:
-            st.success("Server load is within the simulated normal range.")
-
-        st.divider()
-        st.subheader("Authentication Bottleneck Analysis")
-
-        bottlenecks = [
-            {"Stage": "Mobile Validation", "Problem": "Invalid input or repeated requests", "Improvement": "Early input validation"},
-            {"Stage": "OTP Generation", "Problem": "High request volume", "Improvement": "Efficient request handling"},
-            {"Stage": "OTP Verification", "Problem": "Repeated failed attempts", "Improvement": "Attempt limits and lockout"},
-            {"Stage": "Database Lookup", "Problem": "High concurrent access", "Improvement": "Caching and optimized queries"},
-            {"Stage": "Pattern Verification", "Problem": "Additional authentication step", "Improvement": "Efficient verification logic"},
-            {"Stage": "Session Creation", "Problem": "Server-side processing delay", "Improvement": "Resource allocation"}
-        ]
-        st.dataframe(bottlenecks, use_container_width=True)
-
-        st.divider()
-        st.subheader("Performance Improvement Matrix")
-
-        improvements = [
-            {"Challenge": "Login Delay", "Proposed Improvement": "Queue Optimization", "Expected Benefit": "Faster Authentication"},
-            {"Challenge": "Server Overload", "Proposed Improvement": "Better Resource Allocation", "Expected Benefit": "Reduced Waiting Time"},
-            {"Challenge": "Unauthorized Access", "Proposed Improvement": "OTP + Pattern MFA", "Expected Benefit": "Enhanced Security"},
-            {"Challenge": "Repeated OTP Attempts", "Proposed Improvement": "Attempt Limitation", "Expected Benefit": "Reduced Abuse"},
-            {"Challenge": "OTP Replay", "Proposed Improvement": "One-Time OTP Usage", "Expected Benefit": "Replay Prevention"},
-            {"Challenge": "Expired OTP", "Proposed Improvement": "Time-Limited OTP", "Expected Benefit": "Reduced Attack Window"},
-            {"Challenge": "High Concurrent Requests", "Proposed Improvement": "Load Management", "Expected Benefit": "Improved Scalability"}
-        ]
-        st.dataframe(improvements, use_container_width=True)
-
-        st.divider()
-        st.subheader("Authentication Request History")
-
-        if st.session_state.requests:
-            st.dataframe(st.session_state.requests, use_container_width=True)
-        else:
-            st.info("No authentication requests recorded yet.")
-
-# ============================================================
-# FOOTER
-# ============================================================
-
-st.divider()
-st.caption("Secure DigiLocker • Academic Prototype • OTP + Dynamic Visual Pattern Authentication")
+    st.markdown(
+        '<div class="footer">Secure DigiLocker | Academic Prototype | Dummy documents only</div>',
+        unsafe_allow_html=True,
+    )
