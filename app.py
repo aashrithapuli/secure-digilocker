@@ -3,7 +3,12 @@ import secrets
 import hashlib
 import hmac
 import time
-from datetime import datetime
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+except ImportError:
+    st_autorefresh = None
+
 
 st.set_page_config(
     page_title="Secure DigiLocker",
@@ -12,214 +17,501 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# -------------------- CSS --------------------
 
-st.markdown("""
-<style>
-.stApp {
-    background: #f5f1ff;
-}
+# =========================================================
+# CONFIGURATION
+# =========================================================
 
-.main-title {
-    font-size: 32px;
-    font-weight: 700;
-    color: #172b4d;
-    text-align: center;
-}
+DEMO_PIN = "123456"
+HMAC_SECRET = b"secure-digilocker-academic-demo-secret"
 
-.subtitle {
-    font-size: 16px;
-    color: #5f6b7a;
-    text-align: center;
-}
+MAX_ATTEMPTS = 3
+OTP_VALID_SECONDS = 60
 
-.gov-header {
-    background: #10246b;
-    color: white;
-    padding: 14px 20px;
-    font-weight: 600;
-    margin-bottom: 25px;
-    border-radius: 0;
-}
 
-.brand {
-    font-size: 28px;
-    font-weight: 700;
-    color: #4d2bb3;
-}
+# =========================================================
+# DOCUMENT DATA
+# =========================================================
 
-.prototype {
-    background: #eee8ff;
-    color: #5530b8;
-    padding: 4px 9px;
-    border-radius: 12px;
-    font-size: 11px;
-    font-weight: 700;
-}
-
-.login-box {
-    background: white;
-    padding: 30px;
-    border-radius: 18px;
-    border: 1px solid #ddd6f3;
-    box-shadow: 0 5px 20px rgba(60, 40, 120, 0.08);
-}
-
-.pattern-number {
-    font-size: 26px;
-    font-weight: 700;
-}
-
-.demo-box {
-    background: #fff8df;
-    border-left: 5px solid #e0a800;
-    padding: 12px;
-    border-radius: 8px;
-}
-
-.success-box {
-    background: #e7f7ed;
-    padding: 12px;
-    border-radius: 8px;
-}
-
-.footer {
-    text-align: center;
-    color: #777;
-    font-size: 13px;
-    margin-top: 35px;
-}
-
-button {
-    min-height: 45px !important;
-}
-
-@media (max-width: 600px) {
-    .main-title {
-        font-size: 26px;
+DOCUMENTS = [
+    {
+        "name": "🪪 Aadhaar Card",
+        "authority": "UIDAI",
+        "status": "Verified",
+        "date": "15 Jan 2025"
+    },
+    {
+        "name": "🚗 Driving Licence",
+        "authority": "Transport Department",
+        "status": "Verified",
+        "date": "20 Feb 2025"
+    },
+    {
+        "name": "🗳️ Voter ID",
+        "authority": "Election Commission",
+        "status": "Verified",
+        "date": "10 Mar 2025"
+    },
+    {
+        "name": "🎓 Class 10 Certificate",
+        "authority": "Education Board",
+        "status": "Verified",
+        "date": "05 Apr 2025"
+    },
+    {
+        "name": "🎓 Class 12 Certificate",
+        "authority": "Education Board",
+        "status": "Verified",
+        "date": "12 May 2025"
+    },
+    {
+        "name": "🎓 Degree Certificate",
+        "authority": "University",
+        "status": "Verified",
+        "date": "15 Jun 2025"
+    },
+    {
+        "name": "📄 PAN Card",
+        "authority": "Income Tax Department",
+        "status": "Verified",
+        "date": "18 Jul 2025"
+    },
+    {
+        "name": "🏥 Health Certificate",
+        "authority": "Health Department",
+        "status": "Verified",
+        "date": "22 Aug 2025"
+    },
+    {
+        "name": "🏦 Income Certificate",
+        "authority": "Revenue Department",
+        "status": "Verified",
+        "date": "30 Sep 2025"
+    },
+    {
+        "name": "📑 Other Documents",
+        "authority": "Various Authorities",
+        "status": "Available",
+        "date": "01 Oct 2025"
     }
-
-    .brand {
-        font-size: 23px;
-    }
-}
-</style>
-""", unsafe_allow_html=True)
+]
 
 
-# -------------------- Session State --------------------
+# =========================================================
+# SESSION STATE
+# =========================================================
 
-defaults = {
-    "stage": "mobile",
+DEFAULTS = {
     "mobile_number": "",
-    "security_pin_attempts": 0,
-    "security_pin_verified": False,
+    "stage": "mobile",
+
+    "pin_attempts": 0,
+    "pin_verified": False,
+
     "otp_hash": "",
     "otp_created_at": 0.0,
     "otp_attempts": 0,
     "otp_used": False,
     "otp_verified": False,
     "demo_otp": "",
+
     "current_pattern": [],
     "entered_pattern": [],
     "pattern_attempts": 0,
     "pattern_verified": False,
+
     "login_status": False,
-    "font_size": 16
+
+    "font_scale": 1.0,
+    "demo_mode": True
 }
 
-for key, value in defaults.items():
+
+for key, value in DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
 
-# -------------------- Helper Functions --------------------
+# =========================================================
+# SECURITY FUNCTIONS
+# =========================================================
 
-PIN_HASH = hashlib.sha256("123456".encode()).hexdigest()
-
-
-def hash_otp(otp):
-    return hmac.new(
-        b"academic-demo-secret",
-        otp.encode(),
-        hashlib.sha256
-    ).hexdigest()
+def hash_pin(pin):
+    return hashlib.sha256(pin.encode()).hexdigest()
 
 
 def generate_otp():
     return f"{secrets.randbelow(1000000):06d}"
 
 
+def otp_digest(otp):
+    return hmac.new(
+        HMAC_SECRET,
+        otp.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+
+def verify_otp(otp):
+    if not st.session_state.otp_hash:
+        return False
+
+    return hmac.compare_digest(
+        otp_digest(otp),
+        st.session_state.otp_hash
+    )
+
+
 def generate_pattern():
     length = secrets.choice([3, 4, 5])
-    return secrets.SystemRandom().sample(range(1, 10), length)
+
+    return secrets.SystemRandom().sample(
+        list(range(1, 10)),
+        length
+    )
 
 
-def reset_authentication():
-    for key, value in defaults.items():
-        st.session_state[key] = value
+# =========================================================
+# AUTHENTICATION FUNCTIONS
+# =========================================================
 
-
-def generate_new_otp():
+def create_new_otp():
     otp = generate_otp()
 
     st.session_state.demo_otp = otp
-    st.session_state.otp_hash = hash_otp(otp)
+    st.session_state.otp_hash = otp_digest(otp)
     st.session_state.otp_created_at = time.time()
     st.session_state.otp_attempts = 0
     st.session_state.otp_used = False
+    st.session_state.otp_verified = False
+
+    st.session_state.current_pattern = []
+    st.session_state.entered_pattern = []
+    st.session_state.pattern_attempts = 0
+    st.session_state.pattern_verified = False
+
     st.session_state.stage = "otp"
 
 
-def generate_new_pattern():
-    st.session_state.current_pattern = generate_pattern()
+def start_authentication(mobile):
+    st.session_state.mobile_number = mobile
+
+    st.session_state.pin_attempts = 0
+    st.session_state.pin_verified = False
+
+    st.session_state.otp_hash = ""
+    st.session_state.otp_created_at = 0.0
+    st.session_state.otp_attempts = 0
+    st.session_state.otp_used = False
+    st.session_state.otp_verified = False
+    st.session_state.demo_otp = ""
+
+    st.session_state.current_pattern = []
     st.session_state.entered_pattern = []
     st.session_state.pattern_attempts = 0
-    st.session_state.stage = "pattern"
+    st.session_state.pattern_verified = False
+
+    st.session_state.login_status = False
+
+    st.session_state.stage = "pin"
 
 
-# -------------------- Header --------------------
+def restart_login():
+    for key, value in DEFAULTS.items():
+        st.session_state[key] = value
+
+    st.rerun()
+
+
+def logout():
+    restart_login()
+
+
+def otp_remaining():
+    if not st.session_state.otp_created_at:
+        return 0
+
+    elapsed = int(
+        time.time() - st.session_state.otp_created_at
+    )
+
+    return max(
+        0,
+        OTP_VALID_SECONDS - elapsed
+    )
+
+
+# =========================================================
+# CSS
+# =========================================================
+
+scale = st.session_state.font_scale
 
 st.markdown(
-    '<div class="gov-header">🇮🇳 Government of India &nbsp; | &nbsp; Secure Digital Services</div>',
+    f"""
+    <style>
+
+    .stApp {{
+        background: #f5f1ff;
+        font-size: {scale}em;
+    }}
+
+    .block-container {{
+        max-width: 900px;
+        padding-top: 1.5rem;
+        padding-bottom: 3rem;
+    }}
+
+    .gov-header {{
+        background: #10246b;
+        color: white;
+        padding: 14px 18px;
+        border-radius: 8px;
+        font-weight: 700;
+        margin-bottom: 20px;
+        text-align: center;
+    }}
+
+    .brand {{
+        text-align: center;
+        font-size: 30px;
+        font-weight: 700;
+        color: #4325a8;
+        margin-top: 10px;
+    }}
+
+    .brand-sub {{
+        text-align: center;
+        color: #666666;
+        margin-bottom: 15px;
+    }}
+
+    .prototype {{
+        display: inline-block;
+        background: #eee8ff;
+        color: #4325a8;
+        padding: 5px 10px;
+        border-radius: 20px;
+        font-size: 12px;
+        font-weight: 700;
+        margin-top: 8px;
+    }}
+
+    .login-card {{
+        background: white;
+        border: 1px solid #ddd5ef;
+        border-radius: 18px;
+        padding: 28px;
+        margin: 25px auto;
+        box-shadow: 0 4px 18px rgba(0,0,0,0.06);
+    }}
+
+    .login-title {{
+        font-size: 30px;
+        font-weight: 700;
+        text-align: center;
+        color: #111111;
+    }}
+
+    .login-subtitle {{
+        text-align: center;
+        color: #666666;
+        margin-top: 5px;
+        margin-bottom: 15px;
+    }}
+
+    .info-box {{
+        background: #e9efff;
+        padding: 15px;
+        border-radius: 10px;
+        margin: 15px 0;
+    }}
+
+    .pattern-box {{
+        background: white;
+        border: 2px solid #d8cef7;
+        border-radius: 14px;
+        padding: 20px;
+        text-align: center;
+        margin: 15px 0;
+    }}
+
+    .pattern-number {{
+        font-size: 30px;
+        font-weight: 800;
+        color: #4325a8;
+        letter-spacing: 5px;
+    }}
+
+    .section-title {{
+        font-size: 28px;
+        font-weight: 700;
+        margin: 20px 0;
+    }}
+
+    .dashboard-banner {{
+        background: linear-gradient(135deg, #5634dd, #7d5bea);
+        color: white;
+        padding: 25px;
+        border-radius: 18px;
+        margin-bottom: 22px;
+    }}
+
+    .dashboard-banner h1 {{
+        margin: 0;
+        font-size: 30px;
+    }}
+
+    .document-card {{
+        background: white;
+        border: 1px solid #ddd5ef;
+        border-radius: 14px;
+        padding: 20px;
+        margin-bottom: 10px;
+        min-height: 210px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    }}
+
+    .document-title {{
+        font-size: 20px;
+        font-weight: 700;
+        margin-bottom: 15px;
+    }}
+
+    .document-info {{
+        line-height: 1.8;
+        color: #444444;
+    }}
+
+    .status {{
+        display: inline-block;
+        padding: 5px 10px;
+        border-radius: 12px;
+        background: #e6f7ec;
+        color: #176b2c;
+        font-weight: 700;
+        margin-top: 5px;
+    }}
+
+    .footer {{
+        text-align: center;
+        color: #666666;
+        padding: 25px 10px;
+        font-size: 13px;
+    }}
+
+    @media (max-width: 600px) {{
+
+        .block-container {{
+            padding-left: 12px;
+            padding-right: 12px;
+        }}
+
+        .gov-header {{
+            font-size: 13px;
+            padding: 12px 8px;
+        }}
+
+        .brand {{
+            font-size: 24px;
+        }}
+
+        .login-card {{
+            padding: 20px 15px;
+            margin: 15px 0;
+        }}
+
+        .login-title {{
+            font-size: 25px;
+        }}
+
+        .section-title {{
+            font-size: 23px;
+        }}
+
+        .dashboard-banner {{
+            padding: 20px;
+        }}
+
+        .dashboard-banner h1 {{
+            font-size: 24px;
+        }}
+
+        .document-card {{
+            min-height: auto;
+        }}
+
+        button {{
+            min-height: 48px !important;
+        }}
+
+        input {{
+            min-height: 48px !important;
+        }}
+
+    }}
+
+    </style>
+    """,
     unsafe_allow_html=True
 )
 
-col1, col2 = st.columns([3, 1])
 
-with col1:
-    st.markdown(
-        '<div class="brand">🔐 Secure DigiLocker</div>',
-        unsafe_allow_html=True
-    )
+# =========================================================
+# HEADER
+# =========================================================
 
-with col2:
-    st.markdown(
-        '<span class="prototype">ACADEMIC PROTOTYPE</span>',
-        unsafe_allow_html=True
-    )
+st.markdown(
+    '<div class="gov-header">🇮🇳 Government of India | Secure Digital Services</div>',
+    unsafe_allow_html=True
+)
 
-st.caption("Secure digital document access")
+st.markdown(
+    '<div class="brand">🔐 Secure DigiLocker</div>',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div style="text-align:center;"><span class="prototype">ACADEMIC PROTOTYPE</span></div>',
+    unsafe_allow_html=True
+)
+
+st.markdown(
+    '<div class="brand-sub">Secure digital document access</div>',
+    unsafe_allow_html=True
+)
 
 
-# -------------------- Accessibility --------------------
+# =========================================================
+# ACCESSIBILITY
+# =========================================================
 
-with st.sidebar:
-    st.header("Accessibility")
+with st.expander("♿ Accessibility"):
 
-    st.session_state.font_size = st.slider(
-        "Text size",
-        min_value=14,
-        max_value=24,
-        value=st.session_state.font_size
-    )
+    st.write("Adjust text size:")
 
-    st.markdown(
-        f"<p style='font-size:{st.session_state.font_size}px;'>"
-        "Accessibility preview text"
-        "</p>",
-        unsafe_allow_html=True
-    )
+    c1, c2, c3 = st.columns(3)
+
+    with c1:
+        if st.button("A−", use_container_width=True):
+            st.session_state.font_scale = max(
+                0.8,
+                st.session_state.font_scale - 0.1
+            )
+            st.rerun()
+
+    with c2:
+        if st.button("A", use_container_width=True):
+            st.session_state.font_scale = 1.0
+            st.rerun()
+
+    with c3:
+        if st.button("A+", use_container_width=True):
+            st.session_state.font_scale = min(
+                1.5,
+                st.session_state.font_scale + 0.1
+            )
+            st.rerun()
 
 
 # =========================================================
@@ -228,19 +520,22 @@ with st.sidebar:
 
 if st.session_state.stage == "mobile":
 
-    st.markdown("---")
-
     st.markdown(
-        '<div class="main-title">Login or Create Account</div>',
+        '<div class="login-card">',
         unsafe_allow_html=True
     )
 
     st.markdown(
-        '<div class="subtitle">Enter your mobile number to proceed</div>',
+        '<div class="login-title">Login or Create Account</div>',
         unsafe_allow_html=True
     )
 
-    st.write("")
+    st.markdown(
+        '<div class="login-subtitle">Enter your mobile number to proceed</div>',
+        unsafe_allow_html=True
+    )
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
     mobile = st.text_input(
         "Mobile Number",
@@ -248,42 +543,52 @@ if st.session_state.stage == "mobile":
         max_chars=10
     )
 
-    st.info(
-        "This is an academic prototype. "
-        "Do not enter real sensitive information."
-    )
+    st.caption("🇮🇳 +91 India")
 
     if st.button(
         "Continue",
-        use_container_width=True,
-        type="primary"
+        type="primary",
+        use_container_width=True
     ):
 
-        if not mobile.isdigit() or len(mobile) != 10:
-            st.error("Please enter a valid 10-digit mobile number.")
+        cleaned = mobile.strip().replace(" ", "")
+
+        if not cleaned.isdigit() or len(cleaned) != 10:
+
+            st.error(
+                "Please enter a valid 10-digit mobile number."
+            )
+
+        elif cleaned[0] not in "6789":
+
+            st.error(
+                "Please enter a valid Indian mobile number."
+            )
 
         else:
-            st.session_state.mobile_number = mobile
-            st.session_state.security_pin_attempts = 0
-            st.session_state.security_pin_verified = False
-            st.session_state.stage = "pin"
-            st.rerun()
 
-    st.markdown("---")
+            start_authentication(cleaned)
+            st.rerun()
 
     st.caption(
         "By continuing, I agree to the Terms of Service."
     )
 
-    st.write("OR")
+    st.divider()
 
     if st.button(
         "📱 Login using QR Code",
         use_container_width=True
     ):
+
         st.info(
-            "QR login is a demonstration feature in this prototype."
+            "QR login is simulated for this academic prototype."
         )
+
+    st.info(
+        "Academic Prototype: This application uses dummy data "
+        "and does not connect to real DigiLocker services."
+    )
 
 
 # =========================================================
@@ -293,27 +598,25 @@ if st.session_state.stage == "mobile":
 elif st.session_state.stage == "pin":
 
     st.markdown(
-        '<div class="main-title">Enter Security PIN</div>',
+        '<div class="login-card">',
         unsafe_allow_html=True
     )
 
     st.markdown(
-        '<div class="subtitle">'
-        'Enter your 6-digit Security PIN to continue'
-        '</div>',
+        '<div class="login-title">Enter Security PIN</div>',
         unsafe_allow_html=True
     )
-
-    st.write("")
 
     st.markdown(
-        '<div class="demo-box">'
-        '<b>Demo Security PIN: 123456</b>'
-        '</div>',
+        '<div class="login-subtitle">Enter your 6-digit Security PIN to continue</div>',
         unsafe_allow_html=True
     )
 
-    st.write("")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.info(
+        "Demo Security PIN: 123456"
+    )
 
     pin = st.text_input(
         "Security PIN",
@@ -322,103 +625,104 @@ elif st.session_state.stage == "pin":
         placeholder="Enter 6-digit PIN"
     )
 
-    col1, col2 = st.columns(2)
+    if st.button(
+        "Continue",
+        type="primary",
+        use_container_width=True
+    ):
 
-    with col1:
-        if st.button(
-            "← Back",
-            use_container_width=True
+        if not pin.isdigit() or len(pin) != 6:
+
+            st.error(
+                "Please enter a valid 6-digit Security PIN."
+            )
+
+        elif hmac.compare_digest(
+            hash_pin(pin),
+            hash_pin(DEMO_PIN)
         ):
-            st.session_state.stage = "mobile"
+
+            st.session_state.pin_verified = True
+
+            create_new_otp()
+
             st.rerun()
 
-    with col2:
-        if st.button(
-            "Continue",
-            use_container_width=True,
-            type="primary"
-        ):
+        else:
 
-            if len(pin) != 6 or not pin.isdigit():
-                st.error("Security PIN must contain 6 digits.")
+            st.session_state.pin_attempts += 1
+
+            remaining = (
+                MAX_ATTEMPTS -
+                st.session_state.pin_attempts
+            )
+
+            if remaining > 0:
+
+                st.error(
+                    "Incorrect Security PIN."
+                )
+
+                st.warning(
+                    f"Remaining attempts: {remaining}"
+                )
 
             else:
-                entered_hash = hashlib.sha256(
-                    pin.encode()
-                ).hexdigest()
 
-                if hmac.compare_digest(
-                    entered_hash,
-                    PIN_HASH
-                ):
+                st.error(
+                    "Too many incorrect attempts. "
+                    "Please restart authentication."
+                )
 
-                    st.session_state.security_pin_verified = True
+                st.session_state.stage = "locked"
 
-                    generate_new_otp()
+    if st.button(
+        "← Back",
+        use_container_width=True
+    ):
 
-                    st.success(
-                        "Security PIN verified successfully."
-                    )
-
-                    st.rerun()
-
-                else:
-
-                    st.session_state.security_pin_attempts += 1
-
-                    remaining = (
-                        3 -
-                        st.session_state.security_pin_attempts
-                    )
-
-                    if remaining > 0:
-
-                        st.error(
-                            f"Incorrect Security PIN. "
-                            f"{remaining} attempt(s) remaining."
-                        )
-
-                    else:
-
-                        st.error(
-                            "Too many incorrect attempts. "
-                            "Please restart authentication."
-                        )
-
-                        st.session_state.stage = "locked"
-
+        st.session_state.stage = "mobile"
+        st.rerun()
 
     if st.button(
         "Forgot Security PIN?",
         use_container_width=True
     ):
+
         st.info(
-            "For this academic prototype, use the Demo Security PIN: 123456."
+            "Demo feature: In a real system, PIN recovery "
+            "would use a secure account-recovery process."
         )
+
+    st.caption(
+        f"PIN attempts: "
+        f"{st.session_state.pin_attempts}/{MAX_ATTEMPTS}"
+    )
 
 
 # =========================================================
-# LOCKED
+# ACCOUNT LOCKED
 # =========================================================
 
 elif st.session_state.stage == "locked":
 
     st.error(
         "Authentication has been temporarily stopped "
-        "because of too many incorrect attempts."
+        "because too many incorrect Security PIN attempts "
+        "were made."
     )
 
-    st.write(
-        "Please restart authentication to try again."
+    st.warning(
+        "Please restart the authentication process."
     )
 
     if st.button(
         "Restart Login",
-        use_container_width=True,
-        type="primary"
+        type="primary",
+        use_container_width=True
     ):
-        reset_authentication()
-        st.rerun()
+
+        restart_login()
 
 
 # =========================================================
@@ -427,143 +731,155 @@ elif st.session_state.stage == "locked":
 
 elif st.session_state.stage == "otp":
 
+    if st_autorefresh is not None:
+
+        st_autorefresh(
+            interval=1000,
+            key="otp_timer"
+        )
+
+    remaining_seconds = otp_remaining()
+
     st.markdown(
-        '<div class="main-title">OTP Verification</div>',
+        '<div class="login-card">',
         unsafe_allow_html=True
     )
 
     st.markdown(
-        '<div class="subtitle">'
-        'Enter the 6-digit OTP to continue'
-        '</div>',
+        '<div class="login-title">OTP Verification</div>',
         unsafe_allow_html=True
     )
 
-    st.write("")
+    st.markdown(
+        '<div class="login-subtitle">Verify your registered mobile number</div>',
+        unsafe_allow_html=True
+    )
 
-    elapsed = time.time() - st.session_state.otp_created_at
-    remaining_seconds = max(0, 60 - int(elapsed))
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    if remaining_seconds == 0:
+    st.info(
+        "Demo OTP — In a real system this would be sent through SMS."
+    )
 
-        st.error("The OTP has expired.")
+    st.success(
+        f"Demo OTP: {st.session_state.demo_otp}"
+    )
+
+    st.metric(
+        "OTP Valid For",
+        f"{remaining_seconds} seconds"
+    )
+
+    if remaining_seconds <= 0:
+
+        st.error(
+            "The OTP has expired."
+        )
 
         if st.button(
             "Resend OTP",
-            use_container_width=True,
-            type="primary"
+            type="primary",
+            use_container_width=True
         ):
-            generate_new_otp()
+
+            create_new_otp()
             st.rerun()
 
     else:
 
-        st.info(
-            f"OTP expires in approximately "
-            f"{remaining_seconds} seconds."
-        )
-
-        st.markdown(
-            '<div class="demo-box">'
-            '<b>Demo OTP — In a real system this would be sent through SMS.</b>'
-            '</div>',
-            unsafe_allow_html=True
-        )
-
-        st.code(
-            st.session_state.demo_otp,
-            language=None
-        )
-
         otp_input = st.text_input(
-            "Enter OTP",
+            "Enter 6-digit OTP",
             max_chars=6,
-            placeholder="6-digit OTP"
+            placeholder="Enter OTP",
+            type="password"
         )
 
-        col1, col2 = st.columns(2)
+        if st.button(
+            "Verify OTP",
+            type="primary",
+            use_container_width=True
+        ):
 
-        with col1:
+            if st.session_state.otp_used:
 
-            if st.button(
-                "Verify OTP",
-                use_container_width=True,
-                type="primary"
-            ):
-
-                elapsed = (
-                    time.time() -
-                    st.session_state.otp_created_at
+                st.error(
+                    "This OTP has already been used."
                 )
 
-                if elapsed >= 60:
+            elif not otp_input.isdigit() or len(otp_input) != 6:
 
-                    st.error("The OTP has expired.")
+                st.error(
+                    "Please enter a valid 6-digit OTP."
+                )
 
-                elif st.session_state.otp_used:
+            elif remaining_seconds <= 0:
+
+                st.error(
+                    "The OTP has expired. Please request a new OTP."
+                )
+
+            elif st.session_state.otp_attempts >= MAX_ATTEMPTS:
+
+                st.error(
+                    "Too many incorrect OTP attempts. "
+                    "Please request a new OTP."
+                )
+
+            elif verify_otp(otp_input):
+
+                st.session_state.otp_used = True
+                st.session_state.otp_verified = True
+
+                st.session_state.current_pattern = (
+                    generate_pattern()
+                )
+
+                st.session_state.entered_pattern = []
+                st.session_state.pattern_attempts = 0
+
+                st.session_state.stage = "pattern"
+
+                st.rerun()
+
+            else:
+
+                st.session_state.otp_attempts += 1
+
+                remaining = (
+                    MAX_ATTEMPTS -
+                    st.session_state.otp_attempts
+                )
+
+                if remaining > 0:
 
                     st.error(
-                        "This OTP has already been used."
+                        "Incorrect OTP."
+                    )
+
+                    st.warning(
+                        f"Remaining attempts: {remaining}"
                     )
 
                 else:
 
-                    entered_hash = hash_otp(
-                        otp_input
+                    st.error(
+                        "Too many incorrect OTP attempts. "
+                        "Please request a new OTP."
                     )
 
-                    if hmac.compare_digest(
-                        entered_hash,
-                        st.session_state.otp_hash
-                    ):
+        if st.button(
+            "Resend OTP",
+            use_container_width=True
+        ):
 
-                        st.session_state.otp_used = True
-                        st.session_state.otp_verified = True
-
-                        generate_new_pattern()
-
-                        st.success(
-                            "OTP verified successfully."
-                        )
-
-                        st.rerun()
-
-                    else:
-
-                        st.session_state.otp_attempts += 1
-
-                        remaining = (
-                            3 -
-                            st.session_state.otp_attempts
-                        )
-
-                        if remaining > 0:
-
-                            st.error(
-                                f"Incorrect OTP. "
-                                f"{remaining} attempt(s) remaining."
-                            )
-
-                        else:
-
-                            st.error(
-                                "Too many incorrect OTP attempts. "
-                                "Please request a new OTP."
-                            )
-
-        with col2:
-
-            if st.button(
-                "Resend OTP",
-                use_container_width=True
-            ):
-                generate_new_otp()
-                st.rerun()
+            create_new_otp()
+            st.rerun()
 
     if st.button(
         "← Back",
         use_container_width=True
     ):
+
         st.session_state.stage = "pin"
         st.rerun()
 
@@ -575,31 +891,47 @@ elif st.session_state.stage == "otp":
 elif st.session_state.stage == "pattern":
 
     st.markdown(
-        '<div class="main-title">Dynamic Security Pattern</div>',
+        '<div class="login-card">',
         unsafe_allow_html=True
     )
 
     st.markdown(
-        '<div class="subtitle">'
-        'Remember the pattern shown below and reproduce it.'
-        '</div>',
+        '<div class="login-title">Dynamic Security Pattern</div>',
         unsafe_allow_html=True
     )
 
-    st.write("")
+    st.markdown(
+        '<div class="login-subtitle">Remember the pattern and reproduce it below</div>',
+        unsafe_allow_html=True
+    )
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
     pattern_text = " → ".join(
-        str(x)
-        for x in st.session_state.current_pattern
+        str(number)
+        for number in st.session_state.current_pattern
     )
+
+    st.markdown(
+        '<div class="pattern-box">',
+        unsafe_allow_html=True
+    )
+
+    st.write("### Pattern")
+
+    st.markdown(
+        f'<div class="pattern-number">{pattern_text}</div>',
+        unsafe_allow_html=True
+    )
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
     st.info(
-        f"Pattern: {pattern_text}"
+        "Remember the numbers in the order shown above, "
+        "then select them in the same order."
     )
 
-    st.write("Select the numbers in the same order.")
-
-    # 3 x 3 numbered grid
+    st.subheader("Number Grid")
 
     for row in range(3):
 
@@ -613,45 +945,59 @@ elif st.session_state.stage == "pattern":
 
                 if number in st.session_state.entered_pattern:
 
-                    button_text = f"✓ {number}"
+                    position = (
+                        st.session_state.entered_pattern.index(number)
+                        + 1
+                    )
+
+                    button_label = (
+                        f"✓ {number}  ({position})"
+                    )
 
                 else:
 
-                    button_text = str(number)
+                    button_label = str(number)
 
                 if st.button(
-                    button_text,
-                    key=f"pattern_{number}",
+                    button_label,
+                    key=f"pattern_button_{number}",
                     use_container_width=True
                 ):
 
                     if number not in st.session_state.entered_pattern:
 
-                        st.session_state.entered_pattern.append(
-                            number
-                        )
+                        if len(
+                            st.session_state.entered_pattern
+                        ) < len(
+                            st.session_state.current_pattern
+                        ):
 
-                    st.rerun()
+                            st.session_state.entered_pattern.append(
+                                number
+                            )
 
-    st.write("")
+                            st.rerun()
 
     entered_text = " → ".join(
-        str(x)
-        for x in st.session_state.entered_pattern
+        str(number)
+        for number in st.session_state.entered_pattern
     )
 
     if entered_text:
-        st.success(
-            f"Pattern entered: {entered_text}"
-        )
-    else:
+
         st.write(
-            "Pattern entered: —"
+            f"**Pattern entered:** {entered_text}"
         )
 
-    col1, col2 = st.columns(2)
+    else:
 
-    with col1:
+        st.write(
+            "**Pattern entered:** —"
+        )
+
+    c1, c2 = st.columns(2)
+
+    with c1:
 
         if st.button(
             "Clear Pattern",
@@ -661,27 +1007,34 @@ elif st.session_state.stage == "pattern":
             st.session_state.entered_pattern = []
             st.rerun()
 
-    with col2:
+    with c2:
 
         if st.button(
             "Verify Pattern",
-            use_container_width=True,
-            type="primary"
+            type="primary",
+            use_container_width=True
         ):
 
-            if (
+            if not st.session_state.otp_verified:
+
+                st.error(
+                    "OTP verification is required first."
+                )
+
+            elif st.session_state.otp_used is not True:
+
+                st.error(
+                    "OTP verification is required first."
+                )
+
+            elif (
                 st.session_state.entered_pattern
-                ==
-                st.session_state.current_pattern
+                == st.session_state.current_pattern
             ):
 
                 st.session_state.pattern_verified = True
                 st.session_state.login_status = True
                 st.session_state.stage = "dashboard"
-
-                st.success(
-                    "Pattern verified successfully."
-                )
 
                 st.rerun()
 
@@ -690,7 +1043,7 @@ elif st.session_state.stage == "pattern":
                 st.session_state.pattern_attempts += 1
 
                 remaining = (
-                    3 -
+                    MAX_ATTEMPTS -
                     st.session_state.pattern_attempts
                 )
 
@@ -699,18 +1052,44 @@ elif st.session_state.stage == "pattern":
                 if remaining > 0:
 
                     st.error(
-                        f"Incorrect pattern. "
-                        f"{remaining} attempt(s) remaining."
+                        "Incorrect pattern."
                     )
+
+                    st.warning(
+                        f"Remaining attempts: {remaining}"
+                    )
+
+                    st.rerun()
 
                 else:
 
-                    st.error(
-                        "Pattern authentication failed. "
-                        "Please restart login."
-                    )
+                    st.session_state.stage = "pattern_failed"
+                    st.rerun()
 
-                    st.session_state.stage = "locked"
+    st.caption(
+        f"Pattern attempts: "
+        f"{st.session_state.pattern_attempts}/{MAX_ATTEMPTS}"
+    )
+
+
+# =========================================================
+# PATTERN FAILED
+# =========================================================
+
+elif st.session_state.stage == "pattern_failed":
+
+    st.error(
+        "Pattern authentication failed. "
+        "Please restart login."
+    )
+
+    if st.button(
+        "Restart Login",
+        type="primary",
+        use_container_width=True
+    ):
+
+        restart_login()
 
 
 # =========================================================
@@ -720,123 +1099,232 @@ elif st.session_state.stage == "pattern":
 elif st.session_state.stage == "dashboard":
 
     st.markdown(
-        '<div class="main-title">Secure DigiLocker</div>',
+        '<div class="dashboard-banner">',
         unsafe_allow_html=True
     )
 
-    st.success("Authentication completed successfully.")
+    st.markdown(
+        "<h1>Welcome back! 👋</h1>",
+        unsafe_allow_html=True
+    )
 
-    col1, col2 = st.columns([3, 1])
+    st.write(
+        "Your secure digital documents are available below."
+    )
+
+    st.markdown(
+        "</div>",
+        unsafe_allow_html=True
+    )
+
+    st.success(
+        "All authentication factors verified successfully."
+    )
+
+    if st.button(
+        "🚪 Logout",
+        type="primary",
+        use_container_width=True
+    ):
+
+        logout()
+
+    st.subheader("Secure DigiLocker Dashboard")
+
+    col1, col2, col3 = st.columns(3)
 
     with col1:
-
-        st.header("Welcome back!")
-
-        st.write(
-            "Your secure digital documents are available below."
+        st.metric(
+            "Documents",
+            "10"
         )
 
     with col2:
+        st.metric(
+            "Verified",
+            "10"
+        )
 
-        if st.button(
-            "Logout",
-            use_container_width=True
-        ):
-
-            reset_authentication()
-            st.rerun()
+    with col3:
+        st.metric(
+            "Shared",
+            "2"
+        )
 
     st.divider()
 
-    st.header("Important Documents")
+    nav = st.selectbox(
+        "Navigation",
+        [
+            "Home",
+            "My Documents",
+            "Issued Documents",
+            "Shared Documents",
+            "Profile",
+            "Help"
+        ]
+    )
 
-    documents = [
-        ("🪪", "Aadhaar Card", "UIDAI", "Verified", "15 Jan 2025"),
-        ("🚗", "Driving Licence", "Transport Department", "Verified", "20 Feb 2025"),
-        ("🗳️", "Voter ID", "Election Commission", "Verified", "10 Mar 2025"),
-        ("🎓", "Class 10 Certificate", "Education Board", "Verified", "15 Apr 2025"),
-        ("🎓", "Class 12 Certificate", "Education Board", "Verified", "20 May 2025"),
-        ("🎓", "Degree Certificate", "University", "Verified", "10 Jun 2025"),
-        ("📄", "PAN Card", "Income Tax Department", "Verified", "05 Jul 2025"),
-        ("🏥", "Health Certificate", "Health Department", "Verified", "12 Aug 2025"),
-        ("🏦", "Income Certificate", "Revenue Department", "Verified", "25 Aug 2025"),
-        ("📑", "Other Documents", "Government Services", "Available", "01 Sep 2025")
-    ]
+    if nav == "Home":
 
-    for i in range(0, len(documents), 2):
+        st.subheader("Important Documents")
 
-        col1, col2 = st.columns(2)
+        st.write(
+            "Access your important digital documents from one place."
+        )
 
-        doc1 = documents[i]
+    elif nav == "My Documents":
 
-        with col1:
+        st.subheader("My Documents")
 
-            with st.container(border=True):
+    elif nav == "Issued Documents":
 
-                st.subheader(
-                    f"{doc1[0]} {doc1[1]}"
-                )
+        st.subheader("Issued Documents")
 
-                st.write(
-                    f"**Issuing Authority:** {doc1[2]}"
-                )
+        st.info(
+            "These are sample documents for the academic prototype."
+        )
 
-                st.write(
-                    f"**Status:** {doc1[3]}"
-                )
+    elif nav == "Shared Documents":
 
-                st.write(
-                    f"**Issue Date:** {doc1[4]}"
-                )
+        st.subheader("Shared Documents")
 
-                b1, b2 = st.columns(2)
+        st.info(
+            "No real documents are shared. This is demo data."
+        )
 
-                with b1:
+    elif nav == "Profile":
 
-                    if st.button(
-                        "View",
-                        key=f"view_{i}",
-                        use_container_width=True
-                    ):
-                        st.info(
-                            f"Demo preview of {doc1[1]}."
-                        )
+        st.subheader("Profile")
 
-                with b2:
+        st.write(
+            "Account: Demo User"
+        )
 
-                    if st.button(
-                        "Download",
-                        key=f"download_{i}",
-                        use_container_width=True
-                    ):
-                        st.info(
-                            "This academic prototype uses "
-                            "dummy documents only."
-                        )
+        st.write(
+            "Mobile Number: ******"
+            + st.session_state.mobile_number[-4:]
+        )
 
-        if i + 1 < len(documents):
+        st.write(
+            "Authentication: PIN + OTP + Dynamic Pattern"
+        )
 
-            doc2 = documents[i + 1]
+        st.write(
+            "Account Type: Academic Prototype"
+        )
 
-            with col2:
+    elif nav == "Help":
+
+        st.subheader(
+            "Help & Security Information"
+        )
+
+        with st.expander(
+            "Security PIN"
+        ):
+
+            st.write(
+                "The Security PIN acts as the primary authentication factor."
+            )
+
+        with st.expander(
+            "OTP Security"
+        ):
+
+            st.write(
+                "A cryptographically secure random 6-digit OTP "
+                "is generated."
+            )
+
+            st.write(
+                "Only an HMAC-SHA256 representation is stored "
+                "for verification."
+            )
+
+            st.write(
+                "The OTP expires after 60 seconds and becomes "
+                "invalid after successful use."
+            )
+
+        with st.expander(
+            "Dynamic Pattern"
+        ):
+
+            st.write(
+                "A new 3–5 number pattern is generated only "
+                "after successful OTP verification."
+            )
+
+            st.write(
+                "The user must reproduce the generated sequence "
+                "using the numbered 3×3 grid."
+            )
+
+        with st.expander(
+            "Combined Authentication"
+        ):
+
+            st.write(
+                "Authentication requires the correct Security PIN, "
+                "OTP and Dynamic Pattern."
+            )
+
+        with st.expander(
+            "Prototype Limitation"
+        ):
+
+            st.write(
+                "This is an academic simulation. It does not connect "
+                "to DigiLocker, UIDAI, SMS gateways or government databases."
+            )
+
+    st.divider()
+
+    st.subheader("Important Documents")
+
+    for i in range(0, len(DOCUMENTS), 2):
+
+        cols = st.columns(2)
+
+        for j in range(2):
+
+            index = i + j
+
+            if index >= len(DOCUMENTS):
+                continue
+
+            doc = DOCUMENTS[index]
+
+            with cols[j]:
 
                 with st.container(border=True):
 
-                    st.subheader(
-                        f"{doc2[0]} {doc2[1]}"
+                    st.markdown(
+                        f"### {doc['name']}"
                     )
 
                     st.write(
-                        f"**Issuing Authority:** {doc2[2]}"
+                        f"**Issuing Authority:** "
+                        f"{doc['authority']}"
                     )
 
                     st.write(
-                        f"**Status:** {doc2[3]}"
+                        f"**Issue Date:** "
+                        f"{doc['date']}"
                     )
 
-                    st.write(
-                        f"**Issue Date:** {doc2[4]}"
-                    )
+                    if doc["status"] == "Verified":
+
+                        st.success(
+                            "✓ Verified"
+                        )
+
+                    else:
+
+                        st.info(
+                            doc["status"]
+                        )
 
                     b1, b2 = st.columns(2)
 
@@ -844,70 +1332,101 @@ elif st.session_state.stage == "dashboard":
 
                         if st.button(
                             "View",
-                            key=f"view_{i+1}",
+                            key=f"view_{index}",
                             use_container_width=True
                         ):
+
                             st.info(
-                                f"Demo preview of {doc2[1]}."
+                                f"Viewing sample document: "
+                                f"{doc['name']}"
                             )
 
                     with b2:
 
-                        if st.button(
+                        sample_document = (
+                            "SECURE DIGILOCKER "
+                            "ACADEMIC PROTOTYPE\n\n"
+                            f"Document: {doc['name']}\n"
+                            f"Issuing Authority: {doc['authority']}\n"
+                            f"Status: {doc['status']}\n"
+                            f"Issue Date: {doc['date']}\n\n"
+                            "Dummy document for demonstration only."
+                        )
+
+                        st.download_button(
                             "Download",
-                            key=f"download_{i+1}",
+                            data=sample_document,
+                            file_name=(
+                                doc["name"]
+                                .replace("🪪 ", "")
+                                .replace("🚗 ", "")
+                                .replace("🗳️ ", "")
+                                .replace("🎓 ", "")
+                                .replace("📄 ", "")
+                                .replace("🏥 ", "")
+                                .replace("🏦 ", "")
+                                .replace("📑 ", "")
+                                .replace(" ", "_")
+                                + "_sample.txt"
+                            ),
+                            mime="text/plain",
+                            key=f"download_{index}",
                             use_container_width=True
-                        ):
-                            st.info(
-                                "This academic prototype uses "
-                                "dummy documents only."
-                            )
+                        )
 
     st.divider()
 
-    st.header("Authentication Security")
-
     with st.expander(
-        "Academic Prototype / Demo"
+        "🔐 Academic Prototype / Security Explanation"
     ):
 
+        st.subheader("Security PIN")
+
         st.write(
-            "Security PIN: First authentication factor."
+            "Primary authentication factor. "
+            "The prototype allows a maximum of three incorrect attempts."
+        )
+
+        st.subheader("OTP")
+
+        st.write(
+            "A cryptographically secure six-digit OTP is generated "
+            "after successful Security PIN verification."
         )
 
         st.write(
-            "OTP: Verifies possession of the registered "
-            "mobile number/device."
+            "The OTP is valid for 60 seconds."
         )
 
         st.write(
-            "OTP expiry: Each OTP is valid for 60 seconds."
+            "After three incorrect attempts, a new OTP must be requested."
         )
 
         st.write(
-            "Attempt limitation: Maximum 3 incorrect "
-            "attempts for PIN, OTP and pattern."
+            "The OTP is invalidated after successful verification."
+        )
+
+        st.subheader("Dynamic Pattern")
+
+        st.write(
+            "After successful OTP verification, a new random pattern "
+            "containing three to five unique numbers from 1 to 9 is generated."
         )
 
         st.write(
-            "One-time OTP: The OTP is invalidated after "
-            "successful verification."
+            "The user must reproduce the numbers in the same order."
         )
 
-        st.write(
-            "Dynamic Pattern: A new 3–5 number pattern "
-            "is generated after successful OTP verification."
-        )
+        st.subheader("Final Authentication")
 
         st.write(
-            "Combined authentication: Security PIN + OTP "
-            "+ Dynamic Pattern."
+            "Security PIN + OTP + Dynamic Pattern = "
+            "Multi-factor authentication prototype."
         )
 
     st.markdown(
         '<div class="footer">'
-        'Secure DigiLocker • Academic Prototype • '
-        'Dummy documents only'
+        'Secure DigiLocker | Academic Prototype | Dummy documents only'
         '</div>',
         unsafe_allow_html=True
     )
