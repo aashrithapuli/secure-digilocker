@@ -187,6 +187,8 @@ def otp_remaining():
 
 # =========================================================
 # CSS
+# (This is an f-string, so literal CSS braces stay doubled: {{ }}
+#  and {scale} is the only real interpolation.)
 # =========================================================
 
 scale = st.session_state.font_scale
@@ -518,13 +520,13 @@ st.markdown(
 # =========================================================
 
 STEP_SEQUENCE = ["mobile", "pin", "otp", "pattern"]
-STEP_LABELS = {{
+STEP_LABELS = {
     "mobile": "Mobile number",
     "pin": "Security PIN",
     "otp": "OTP verification",
     "pattern": "Security pattern",
     "pattern_setup": "Create your pattern",
-}}
+}
 
 
 def render_step_progress(current_stage):
@@ -546,11 +548,11 @@ def render_step_progress(current_stage):
 
     label = STEP_LABELS.get(current_stage, "")
 
-    st.markdown(f'<div class="step-track" role="presentation">{{dots_html}}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="step-track" role="presentation">{dots_html}</div>', unsafe_allow_html=True)
     st.markdown(
         f'<p class="step-label">'
-        f'<span class="sr-only">Step {{current_index + 1}} of {{total}}: </span>'
-        f'{{label}} &nbsp;&middot;&nbsp; Step {{current_index + 1}} of {{total}}'
+        f'<span class="sr-only">Step {current_index + 1} of {total}: </span>'
+        f'{label} &nbsp;&middot;&nbsp; Step {current_index + 1} of {total}'
         f'</p>',
         unsafe_allow_html=True
     )
